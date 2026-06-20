@@ -37,3 +37,8 @@ Preview*.csv
 # Local IDE files
 .vs/
 .vscode/
+
+# Local secrets
+Github key.txt
+*token*.txt
+*secret*.txt
