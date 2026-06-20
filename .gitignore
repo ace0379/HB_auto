@@ -7,6 +7,7 @@ __pycache__/
 # Local build / packaged app outputs
 build/
 dist/
+release/
 *.spec
 
 # Conversion outputs and temporary extraction folders
