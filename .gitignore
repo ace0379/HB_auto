@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Local build / packaged app outputs
+build/
+dist/
+*.spec
+
+# Conversion outputs and temporary extraction folders
+output/
+Output/
+output_files/
+test_output*/
+test_extracted*/
+test_main_cli*/
+*_extracted/
+
+# Generated reports
+Preview*.xlsx
+Preview*.csv
+*_result.xlsx
+*_all_rates.csv
+*_all_rates.xlsx
+*_channels.csv
+*_channels.xlsx
+*_[0-9]Hz.csv
+*_[0-9]Hz.xlsx
+
+# Large input/raw measurement files
+*.iad
+*.cha
+*.ird
+
+# Local IDE files
+.vs/
+.vscode/
