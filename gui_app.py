@@ -39,6 +39,7 @@ class TimeSeriesPlot(QtWidgets.QWidget):
         self.pan_start_range: tuple[float, float] | None = None
         self.drag_mode: str | None = None
         self.pending_range_start: float | None = None
+        self.user_defined_range = False
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
@@ -65,12 +66,18 @@ class TimeSeriesPlot(QtWidgets.QWidget):
         self.pan_start_range = None
         self.drag_mode = None
         self.pending_range_start = None
+        self.user_defined_range = False
         self.update()
 
     def set_range(self, start_s: float, end_s: float) -> None:
         self.start_s = min(start_s, end_s)
         self.end_s = max(start_s, end_s)
         self.update()
+
+    def set_user_defined_range(self, enabled: bool) -> None:
+        self.user_defined_range = enabled
+        self.pending_range_start = None
+
 
     def paintEvent(self, event) -> None:
         painter = QtGui.QPainter(self)
@@ -160,6 +167,12 @@ class TimeSeriesPlot(QtWidgets.QWidget):
             return
 
         clicked_x = self._pixel_to_x(event.position().x())
+        if not self.user_defined_range:
+            self.pending_range_start = None
+            self.set_range(clicked_x, clicked_x)
+            self.range_changed.emit(round(clicked_x, 1), round(clicked_x, 1))
+            return
+
         if self.pending_range_start is None:
             self.pending_range_start = clicked_x
             self.set_range(clicked_x, clicked_x)
@@ -405,6 +418,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.CAC_channels: list[str] = []
         self.isPlotted = False
         self.header_df = pd.DataFrame()
+        self.average_baseline_s: float | None = None
         self.setup_ui()
 
     def setup_ui(self) -> None:
@@ -553,7 +567,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_Preview = QtWidgets.QPushButton("Preview...", self.centralwidget)
         self.pushButton_Preview.setGeometry(QtCore.QRect(780, 690, 100, 70))
         self.pushButton_Export = QtWidgets.QPushButton("Export...", self.centralwidget)
-        self.pushButton_Export.setGeometry(QtCore.QRect(780, 770, 100, 70))
+        self.pushButton_Export.setGeometry(QtCore.QRect(780, 755, 100, 55))
+        self.pushButton_Exit = QtWidgets.QPushButton("전체종료", self.centralwidget)
+        self.pushButton_Exit.setGeometry(QtCore.QRect(780, 815, 100, 35))
 
         self.label_Start_time = QtWidgets.QLabel("Start s", self.centralwidget)
         self.label_Start_time.setGeometry(QtCore.QRect(460, 20, 55, 20))
@@ -589,6 +605,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_Clear_all.clicked.connect(self.clearing)
         self.pushButton_Preview.clicked.connect(self.previewing)
         self.pushButton_Export.clicked.connect(self.output)
+        self.pushButton_Exit.clicked.connect(QtWidgets.QApplication.quit)
+        self.radioButton_Ten_min.toggled.connect(self._radio_mode_changed)
+        self.radioButton_Five_min.toggled.connect(self._radio_mode_changed)
+        self.radioButton_User_defined.toggled.connect(self._radio_mode_changed)
         self.doubleSpinBox_Start.valueChanged.connect(self._spin_range_changed)
         self.doubleSpinBox_End.valueChanged.connect(self._spin_range_changed)
 
@@ -707,9 +727,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.plotWidget.set_series(series)
+        self._radio_mode_changed()
         self.plotWidget.set_range(self.doubleSpinBox_Start.value(), self.doubleSpinBox_End.value())
         self.isPlotted = True
-        self.statusbar.showMessage("Wheel: zoom, left-drag: pan, double-click twice: averaging range.")
+        self.statusbar.showMessage(self._plot_help_text())
 
     def averaging_forward(self) -> None:
         self._apply_period(forward=True)
@@ -810,6 +831,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.grouped_tens = pd.DataFrame()
         self.grouped_hundreds = pd.DataFrame()
         self.result_path = None
+        self.average_baseline_s = None
         self.isPlotted = False
         self.listView_Sampling_channels.clear()
         self.listView_Recording_channels.clear()
@@ -869,26 +891,49 @@ class MainWindow(QtWidgets.QMainWindow):
         self.doubleSpinBox_End.setValue(end_s)
         self.doubleSpinBox_Start.blockSignals(False)
         self.doubleSpinBox_End.blockSignals(False)
-        self.statusbar.showMessage(f"Averaging range: {start_s:.1f}s ~ {end_s:.1f}s")
+        if not self.radioButton_User_defined.isChecked() and start_s == end_s:
+            self.average_baseline_s = start_s
+            self.statusbar.showMessage(f"Baseline: {start_s:.1f}s. Press << or >> to apply fixed averaging period.")
+        else:
+            self.statusbar.showMessage(f"Averaging range: {min(start_s, end_s):.1f}s ~ {max(start_s, end_s):.1f}s")
 
     def _spin_range_changed(self) -> None:
         self.plotWidget.set_range(self.doubleSpinBox_Start.value(), self.doubleSpinBox_End.value())
 
+    def _radio_mode_changed(self) -> None:
+        user_defined = self.radioButton_User_defined.isChecked()
+        self.plotWidget.set_user_defined_range(user_defined)
+        self.statusbar.showMessage(self._plot_help_text())
+
+    def _plot_help_text(self) -> str:
+        if self.radioButton_User_defined.isChecked():
+            return "Wheel: zoom, left-drag: pan, double-click twice: averaging range."
+        period = "5 minutes" if self.radioButton_Five_min.isChecked() else "10 minutes"
+        return f"Wheel: zoom, left-drag: pan, double-click: baseline, << or >>: {period} averaging range."
+
     def _apply_period(self, forward: bool) -> None:
-        start = self.doubleSpinBox_Start.value()
-        period = 600.0
-        if self.radioButton_Five_min.isChecked():
-            period = 300.0
-        elif self.radioButton_User_defined.isChecked():
-            period = abs(self.doubleSpinBox_End.value() - self.doubleSpinBox_Start.value())
+        baseline = self.average_baseline_s if self.average_baseline_s is not None else self.doubleSpinBox_Start.value()
+        period = 300.0 if self.radioButton_Five_min.isChecked() else 600.0
+
+        if self.radioButton_User_defined.isChecked():
+            self.plotWidget.set_range(self.doubleSpinBox_Start.value(), self.doubleSpinBox_End.value())
+            return
 
         if forward:
-            end = min(start + period, self._max_time())
+            start = baseline
+            end = min(baseline + period, self._max_time())
         else:
-            end = max(start - period, 0.0)
+            start = max(baseline - period, 0.0)
+            end = baseline
 
+        self.doubleSpinBox_Start.blockSignals(True)
+        self.doubleSpinBox_End.blockSignals(True)
+        self.doubleSpinBox_Start.setValue(start)
         self.doubleSpinBox_End.setValue(end)
-        self.plotWidget.set_range(self.doubleSpinBox_Start.value(), self.doubleSpinBox_End.value())
+        self.doubleSpinBox_Start.blockSignals(False)
+        self.doubleSpinBox_End.blockSignals(False)
+        self.plotWidget.set_range(start, end)
+        self.statusbar.showMessage(f"Averaging range: {start:.1f}s ~ {end:.1f}s")
 
     def _series_for_channel(self, channel_name: str) -> dict | None:
         for df in self._groups().values():
