@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3 - 2026-07-04
+
+- Added an installation launcher that clears PYTHONHOME and PYTHONPATH before starting the PyInstaller app.
+- Added installer checks for the embedded Python standard library archive to catch incomplete extraction or quarantined files.
+- Included launch.cmd in release packages and updated install notes for company PCs.
 ## 0.1.2 - 2026-07-04
 
 - Improved IAD extraction for logger exports that contain ZIP local headers without a central directory.
