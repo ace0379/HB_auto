@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 - 2026-07-04
+
+- Improved IAD extraction for logger exports that contain ZIP local headers without a central directory.
+- Fixed physical int16 CHA scaling by handling CHA headers and signed raw offsets correctly.
+- Added support for scaled physical CHA records stored as timestamp plus raw value pairs.
+- Inferred output sample rate from converted time data when metadata sampleRate is misleading.
+- Skipped media channels during numeric conversion.
+
 ## 0.1.1 - 2026-06-27
 
 - Changed fixed 10-minute/5-minute averaging mode so graph double-click sets a single baseline and << / >> applies the selected fixed range.

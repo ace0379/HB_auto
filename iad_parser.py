@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import struct
+import zlib
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -18,15 +20,72 @@ XML_SIGNATURES = (
 
 
 def extract_iad(iad_path: str | Path, out_dir: str | Path) -> list[Path]:
-    """Extract a zip-based IPETRONIK .iad file and return extracted paths."""
+    """Extract an IPETRONIK .iad file and return extracted paths.
+
+    Most IAD files are normal ZIP containers. Some logger exports contain only
+    ZIP local file headers without the central directory, so fall back to a
+    local-header extractor when ``zipfile`` rejects the archive.
+    """
     iad_path = Path(iad_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(iad_path, "r") as zf:
-        zf.extractall(out_dir)
+    try:
+        with zipfile.ZipFile(iad_path, "r") as zf:
+            zf.extractall(out_dir)
+    except zipfile.BadZipFile:
+        _extract_iad_from_local_headers(iad_path, out_dir)
 
     return list(out_dir.glob("*"))
+
+
+def _extract_iad_from_local_headers(iad_path: Path, out_dir: Path) -> None:
+    data = iad_path.read_bytes()
+    offset = 0
+    extracted = 0
+
+    while True:
+        header_pos = data.find(b"PK\x03\x04", offset)
+        if header_pos < 0:
+            break
+        if header_pos + 30 > len(data):
+            break
+
+        header = data[header_pos : header_pos + 30]
+        _, _, _, method, _, _, _, compressed_size, _, name_len, extra_len = struct.unpack("<IHHHHHIIIHH", header)
+        name_start = header_pos + 30
+        name_end = name_start + name_len
+        payload_start = name_end + extra_len
+        payload_end = payload_start + compressed_size
+        if name_end > len(data) or payload_end > len(data):
+            break
+
+        raw_name = data[name_start:name_end].decode("utf-8", errors="replace")
+        target = _safe_extract_path(out_dir, raw_name)
+        payload = data[payload_start:payload_end]
+
+        if method == 0:
+            content = payload
+        elif method == 8:
+            content = zlib.decompress(payload, -zlib.MAX_WBITS)
+        else:
+            raise zipfile.BadZipFile(f"Unsupported IAD local-header compression method: {method}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        extracted += 1
+        offset = payload_end
+
+    if extracted == 0:
+        raise zipfile.BadZipFile(f"File is not a zip file: {iad_path}")
+
+
+def _safe_extract_path(out_dir: Path, member_name: str) -> Path:
+    target = (out_dir / member_name).resolve()
+    root = out_dir.resolve()
+    if root != target and root not in target.parents:
+        raise zipfile.BadZipFile(f"Unsafe IAD member path: {member_name}")
+    return target
 
 
 def find_ird_file(work_dir: str | Path) -> Path:
@@ -105,8 +164,18 @@ def parse_channels(xml_path: str | Path) -> pd.DataFrame:
             physical_max = _to_float(values.get("sensorMax"))
         sample_rate = _to_float(values.get("sampleRate"), default=1.0)
         no_value = _parse_no_value(values.get("noValueValue"))
+        data_type = _to_int(values.get("dataType"))
+        scale_factor = _to_float(values.get("scaleFactor"))
+        scale_base = _to_float(values.get("scaleBase"), default=0.0)
+        value_count = _to_int(values.get("valueCountX"))
 
-        if bit_count is not None:
+        is_media_channel = _is_media_channel(name, values, data_type)
+
+        if is_media_channel:
+            channel_type = "media"
+            dtype = "media"
+            scale, offset, formula = None, None, "media"
+        elif bit_count is not None:
             channel_type = "can"
             if binary_min is None:
                 binary_min = 0
@@ -119,7 +188,16 @@ def parse_channels(xml_path: str | Path) -> pd.DataFrame:
                 dtype = "uint16"
             else:
                 dtype = "uint32"
-        else:
+            scale, offset, formula = build_conversion(
+                channel_type=channel_type,
+                bit_count=bit_count,
+                data_size=data_size,
+                binary_min=binary_min,
+                binary_max=binary_max,
+                physical_min=physical_min,
+                physical_max=physical_max,
+            )
+        elif data_size is not None:
             channel_type = "physical"
             if data_size == 2:
                 dtype = "int16"
@@ -127,17 +205,29 @@ def parse_channels(xml_path: str | Path) -> pd.DataFrame:
                 dtype = "float32"
             else:
                 dtype = "unknown"
-
-        scale, offset, formula = build_conversion(
-            channel_type=channel_type,
-            bit_count=bit_count,
-            data_size=data_size,
-            binary_min=binary_min,
-            binary_max=binary_max,
-            physical_min=physical_min,
-            physical_max=physical_max,
-        )
-
+            scale, offset, formula = build_conversion(
+                channel_type=channel_type,
+                bit_count=bit_count,
+                data_size=data_size,
+                binary_min=binary_min,
+                binary_max=binary_max,
+                physical_min=physical_min,
+                physical_max=physical_max,
+            )
+            if dtype == "int16" and scale is not None and physical_min is not None:
+                raw_min = np.iinfo(np.int16).min
+                offset = physical_min - scale * raw_min
+                formula = f"physical = (raw - {raw_min}) * {scale:g} + {physical_min:g}"
+        elif data_type is not None and scale_factor is not None:
+            channel_type = "scaled_physical"
+            dtype = _dtype_from_data_type(data_type)
+            scale = scale_factor
+            offset = scale_base
+            formula = f"physical = raw * {scale:g} + {offset:g}"
+        else:
+            channel_type = "physical"
+            dtype = "unknown"
+            scale, offset, formula = None, None, "raw"
         rows.append(
             {
                 "channel_index": idx,
@@ -147,6 +237,8 @@ def parse_channels(xml_path: str | Path) -> pd.DataFrame:
                 "channel_type": channel_type,
                 "sampleRate": sample_rate,
                 "dataSizeMax": data_size,
+                "dataType": data_type,
+                "valueCountX": value_count,
                 "bitCount": bit_count,
                 "dtype": dtype,
                 "binaryMin": binary_min,
@@ -177,6 +269,7 @@ def cha_to_dataframe(
     meta = ch_meta.to_dict() if hasattr(ch_meta, "to_dict") else dict(ch_meta)
     dtype = meta.get("dtype")
 
+    time_s = None
     if meta.get("channel_type") == "can":
         dtype_map = {
             "uint8": np.uint8,
@@ -186,13 +279,11 @@ def cha_to_dataframe(
         if dtype not in dtype_map:
             raise ValueError(f"Unsupported CAN dtype: {dtype}")
         raw = np.fromfile(cha_path, dtype=dtype_map[dtype]).astype(float)
+    elif meta.get("channel_type") == "scaled_physical":
+        raw, time_s = _read_scaled_physical_cha(cha_path, dtype, meta)
+        raw = raw.astype(float)
     else:
-        if dtype == "int16":
-            raw = np.fromfile(cha_path, dtype="<i2").astype(float)
-        elif dtype == "float32":
-            raw = np.fromfile(cha_path, dtype="<f4").astype(float)
-        else:
-            raise ValueError(f"Unsupported physical dtype: {dtype}")
+        raw = _read_physical_cha(cha_path, dtype).astype(float)
 
     no_value = meta.get("noValueValue")
     if pd.notna(no_value):
@@ -208,8 +299,9 @@ def cha_to_dataframe(
     else:
         physical = raw
 
-    sample_rate = float(meta.get("sampleRate") or 1)
-    time_s = np.arange(len(physical)) / sample_rate
+    if time_s is None:
+        sample_rate = float(meta.get("sampleRate") or 1)
+        time_s = np.arange(len(physical)) / sample_rate
 
     df = pd.DataFrame({"time_s": time_s, meta["name"]: physical})
 
@@ -219,6 +311,79 @@ def cha_to_dataframe(
         df.reset_index(drop=True, inplace=True)
 
     return df
+
+
+
+def _read_physical_cha(cha_path: str | Path, dtype: str) -> np.ndarray:
+    dtype_map = {
+        "int16": np.dtype("<i2"),
+        "float32": np.dtype("<f4"),
+    }
+    if dtype not in dtype_map:
+        raise ValueError(f"Unsupported physical dtype: {dtype}")
+
+    np_dtype = dtype_map[dtype]
+    data = Path(cha_path).read_bytes()
+    if len(data) > 8 and (len(data) - 8) % np_dtype.itemsize == 0:
+        data = data[8:]
+    return np.frombuffer(data, dtype=np_dtype).copy()
+
+
+def _read_scaled_physical_cha(cha_path: str | Path, dtype: str, meta: dict) -> tuple[np.ndarray, np.ndarray | None]:
+    dtype_map = {
+        "uint8": np.dtype("u1"),
+        "uint16": np.dtype("<u2"),
+        "int16": np.dtype("<i2"),
+        "float32": np.dtype("<f4"),
+    }
+    if dtype not in dtype_map:
+        raise ValueError(f"Unsupported scaled physical dtype: {dtype}")
+
+    np_dtype = dtype_map[dtype]
+    data = Path(cha_path).read_bytes()
+    value_count = meta.get("valueCountX")
+    value_count = int(value_count) if pd.notna(value_count) else None
+
+    if value_count is not None:
+        record_size = 8 + np_dtype.itemsize
+        expected_record_bytes = value_count * record_size
+        if len(data) == expected_record_bytes:
+            record_dtype = np.dtype([("time_ticks", "<u8"), ("raw", np_dtype)])
+            records = np.frombuffer(data, dtype=record_dtype)
+            ticks = records["time_ticks"].astype(float)
+            diffs = np.diff(ticks)
+            diffs = diffs[diffs > 0]
+            step_s = float(np.median(diffs) / 10_000_000.0) if len(diffs) else 0.0
+            if step_s > 0:
+                time_s = np.arange(len(records), dtype=float) * step_s
+            else:
+                time_s = None
+            return records["raw"].copy(), time_s
+
+        expected_bytes = value_count * np_dtype.itemsize
+        extra_bytes = len(data) - expected_bytes
+        if extra_bytes >= 0:
+            raw = np.frombuffer(data[extra_bytes:], dtype=np_dtype)[:value_count]
+            return raw.copy(), None
+
+    return np.frombuffer(data, dtype=np_dtype).copy(), None
+
+
+
+def _is_media_channel(name: str, values: dict, data_type: int | None) -> bool:
+    media_text = " ".join(
+        str(value or "")
+        for value in (name, values.get("comment"), values.get("dataFile"), values.get("reference"))
+    ).lower()
+    return data_type in {4098} or "video" in media_text or "image" in media_text or "webcam" in media_text
+
+def _dtype_from_data_type(data_type: int | None) -> str:
+    return {
+        1: "uint8",
+        2: "int16",
+        3: "uint16",
+        4: "float32",
+    }.get(data_type, "unknown")
 
 
 def build_conversion(
@@ -289,6 +454,11 @@ def _parse_no_value(value: str | None) -> int | None:
     if value is None:
         return None
     try:
-        return int(value, 16)
+        parsed = int(value, 16)
     except ValueError:
-        return _to_int(value)
+        parsed = _to_int(value)
+    if parsed is None:
+        return None
+    if parsed > np.iinfo(np.uint64).max:
+        return None
+    return parsed

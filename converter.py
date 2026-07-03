@@ -52,8 +52,10 @@ def iad_to_csv(
     if write_excel:
         channels.to_excel(csv_dir / f"{prefix}_channels.xlsx", index=False)
 
+    conversion_channels = channels[channels["channel_type"] != "media"].copy()
+
     rate_groups: dict[float, list[pd.Series]] = defaultdict(list)
-    for _, row in channels.iterrows():
+    for _, row in conversion_channels.iterrows():
         rate_groups[float(row["sampleRate"])].append(row)
 
     for rate, rows in sorted(rate_groups.items()):
@@ -64,9 +66,10 @@ def iad_to_csv(
             print(f"No valid channels for {rate:g} Hz")
             continue
 
-        df_rate = normalize_to_ipemotion_csv(df_rate, rate)
-        csv_path, xlsx_path = write_rate_outputs(df_rate, csv_dir, prefix, rate, write_excel)
-        print(f"{rate:g} Hz CSV created: {csv_path}")
+        output_rate = _infer_sample_rate(df_rate, rate)
+        df_rate = normalize_to_ipemotion_csv(df_rate, output_rate)
+        csv_path, xlsx_path = write_rate_outputs(df_rate, csv_dir, prefix, output_rate, write_excel)
+        print(f"{output_rate:g} Hz CSV created: {csv_path}")
         if xlsx_path:
             print(f"{rate:g} Hz Excel created: {xlsx_path}")
 
@@ -77,6 +80,24 @@ def iad_to_csv(
         write_excel=write_excel,
     )
 
+def _infer_sample_rate(df: pd.DataFrame, fallback_rate: float) -> float:
+    if df is None or df.empty or "time_s" not in df.columns or len(df) < 2:
+        return fallback_rate
+
+    diffs = pd.Series(df["time_s"]).diff().dropna()
+    diffs = diffs[diffs > 0]
+    if diffs.empty:
+        return fallback_rate
+
+    step = float(diffs.median())
+    if step <= 0:
+        return fallback_rate
+
+    inferred = 1.0 / step
+    rounded = round(inferred)
+    if abs(inferred - rounded) < 1e-6:
+        return float(rounded)
+    return inferred
 
 def _remove_previous_outputs(csv_dir: Path, prefix: str) -> None:
     for pattern in (f"{prefix}_*.csv", f"{prefix}_*.xlsx"):
@@ -89,8 +110,16 @@ def validate_iad(iad_path: str | Path) -> None:
     iad_path = Path(iad_path)
     if not iad_path.exists():
         raise FileNotFoundError(f"Input file not found: {iad_path}")
-    with zipfile.ZipFile(iad_path, "r"):
-        pass
+
+    try:
+        with zipfile.ZipFile(iad_path, "r"):
+            pass
+    except zipfile.BadZipFile:
+        # Some logger exports omit the ZIP central directory but still contain
+        # valid local file headers, which extract_iad can recover.
+        with iad_path.open("rb") as file:
+            if file.read(4) != b"PK\x03\x04":
+                raise
 
 
 def _build_rate_dataframe(
