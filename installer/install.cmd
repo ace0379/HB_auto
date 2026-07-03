@@ -15,10 +15,10 @@ if not exist "%SRC_DIR%\HB_Automation.exe" (
   exit /b 1
 )
 
-if not exist "%SRC_DIR%\_internal\base_library.zip" (
-  echo [ERROR] app\_internal\base_library.zip not found.
-  echo The embedded Python standard library is missing. Extract the whole zip again,
-  echo or ask IT/security to restore quarantined files.
+if not exist "%SRC_DIR%\_internal\base_library.zip" if not exist "%SRC_DIR%\_internal\encodings" (
+  echo [ERROR] Embedded Python standard library not found.
+  echo Expected app\_internal\base_library.zip or app\_internal\encodings.
+  echo Copy the whole package folder again, or ask IT/security to restore quarantined files.
   pause
   exit /b 1
 )

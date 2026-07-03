@@ -1,6 +1,8 @@
 param(
     [string]$Version = "",
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$NoArchive,
+    [switch]$NoPackageZip
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,13 +28,23 @@ if ($Clean) {
 
 New-Item -ItemType Directory -Force -Path $ReleaseRoot | Out-Null
 
-python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    --windowed `
-    --onedir `
-    --name $AppName `
-    main.py
+$PyInstallerArgs = @(
+    "-m", "PyInstaller",
+    "--noconfirm",
+    "--clean",
+    "--windowed",
+    "--onedir",
+    "--name", $AppName
+)
+if ($NoArchive) {
+    $PyInstallerArgs += @("--debug", "noarchive")
+}
+$PyInstallerArgs += "main.py"
+
+python @PyInstallerArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
 
 Remove-Item -LiteralPath $PackageDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
@@ -45,16 +57,25 @@ Copy-Item -LiteralPath (Join-Path $InstallerSrc "README_INSTALL.txt") -Destinati
 Copy-Item -LiteralPath (Join-Path $Root "VERSION") -Destination (Join-Path $PackageDir "VERSION") -Force
 Copy-Item -LiteralPath (Join-Path $Root "CHANGELOG.md") -Destination (Join-Path $PackageDir "CHANGELOG.md") -Force
 
-$ZipPath = Join-Path $ReleaseRoot "${AppName}_v$Version.zip"
-Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
-Compress-Archive -LiteralPath $PackageDir -DestinationPath $ZipPath -Force
+Write-Host ""
+Write-Host "Release package folder created:"
+Write-Host "  $PackageDir"
 
-if (-not (Test-Path -LiteralPath $ZipPath)) {
-    throw "Failed to create release zip: $ZipPath"
+if (-not $NoPackageZip) {
+    $ZipPath = Join-Path $ReleaseRoot "${AppName}_v$Version.zip"
+    Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+    Compress-Archive -LiteralPath $PackageDir -DestinationPath $ZipPath -Force
+
+    if (-not (Test-Path -LiteralPath $ZipPath)) {
+        throw "Failed to create release zip: $ZipPath"
+    }
+
+    Write-Host ""
+    Write-Host "Release package zip created:"
+    Write-Host "  $ZipPath"
+    Write-Host ""
+    Write-Host "Give this zip file to team members. They only need to extract it and run install.cmd."
+} else {
+    Write-Host ""
+    Write-Host "No zip file was created. Copy the whole package folder to the target PC and run install.cmd."
 }
-
-Write-Host ""
-Write-Host "Release package created:"
-Write-Host "  $ZipPath"
-Write-Host ""
-Write-Host "Give this zip file to team members. They only need to extract it and run install.cmd."

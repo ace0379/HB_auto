@@ -14,4 +14,4 @@ Uninstall:
 Notes:
   Do not copy install.cmd or HB_Automation.exe alone. Keep the app folder and launch.cmd next to install.cmd.
   The desktop shortcut starts launch.cmd, which clears PYTHONHOME and PYTHONPATH before running the embedded Python app.
-  If app\_internal\base_library.zip is missing, extract the zip again or ask IT/security to restore quarantined files.
+  For no-zip builds, app\_internal\encodings is used instead of app\_internal\base_library.zip. Copy the whole package folder, not just HB_Automation.exe.
