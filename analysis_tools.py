@@ -20,7 +20,7 @@ def preprocessing(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(col).strip() for col in df.columns]
 
     unit_row = None
-    for index in range(min(len(df), 20)):
+    for index in range(min(len(df), 80)):
         row_text = " ".join(map(str, df.iloc[index].tolist()))
         if "(s)" in row_text:
             unit_row = index
@@ -39,6 +39,7 @@ def preprocessing(df: pd.DataFrame) -> pd.DataFrame:
     for column in df.columns:
         df[column] = pd.to_numeric(df[column], errors="coerce")
 
+    df = df.dropna(axis=0, how="all")
     return df.dropna(axis=1, how="all")
 
 
@@ -125,7 +126,10 @@ def average_channel(groups: dict[int, pd.DataFrame], channel_name: str, start_s:
             continue
         time_column = df.columns[0]
         filtered = df.loc[(df[time_column] >= start_s) & (df[time_column] <= end_s), channel_name]
-        return round(float(filtered.mean()), 1)
+        numeric = pd.to_numeric(filtered, errors="coerce").dropna()
+        if numeric.empty:
+            raise ValueError(f"Channel has no numeric samples in averaging range: {channel_name}")
+        return round(float(numeric.mean()), 1)
 
     raise KeyError(f"Channel not found: {channel_name}")
 
@@ -164,15 +168,19 @@ def export_average_excel(
         bottom=Side(style="thin"),
     )
 
+    column_widths: dict[int, float] = {}
     for col in ws.columns:
         max_length = 0
-        column = get_column_letter(col[0].column)
+        column_index = col[0].column
+        column = get_column_letter(column_index)
         for cell in col:
             max_length = max(max_length, len(str(cell.value)) if cell.value is not None else 0)
             cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = thin_border
-        ws.column_dimensions[column].width = max_length + 2
+        column_widths[column_index] = max_length + 2
+        ws.column_dimensions[column].width = column_widths[column_index]
 
+    value_column_width = max(column_widths.get(2, 0), column_widths.get(3, 0), 10)
     for row in range(1, top_rows + 1):
         if ws.cell(row, 3).value is not None and ws.cell(row, 2).value in (None, ""):
             ws.cell(row, 2).value = ws.cell(row, 3).value
@@ -180,6 +188,9 @@ def export_average_excel(
         ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=3)
         ws.cell(row, 2).alignment = Alignment(horizontal="center", vertical="center")
         ws.cell(row, 2).border = thin_border
+
+    ws.column_dimensions["B"].width = value_column_width
+    ws.column_dimensions["C"].width = value_column_width
 
     wb.save(output_path)
     wb.close()

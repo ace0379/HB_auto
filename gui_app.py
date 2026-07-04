@@ -36,7 +36,9 @@ class TimeSeriesPlot(QtWidgets.QWidget):
         self.y_max = 1.0
         self.drag_start_x: float | None = None
         self.pan_start_pixel_x: float | None = None
+        self.pan_start_pixel_y: float | None = None
         self.pan_start_range: tuple[float, float] | None = None
+        self.pan_start_y_range: tuple[float, float] | None = None
         self.drag_mode: str | None = None
         self.pending_range_start: float | None = None
         self.user_defined_range = False
@@ -63,7 +65,9 @@ class TimeSeriesPlot(QtWidgets.QWidget):
         self.y_max = 1.0
         self.drag_start_x = None
         self.pan_start_pixel_x = None
+        self.pan_start_pixel_y = None
         self.pan_start_range = None
+        self.pan_start_y_range = None
         self.drag_mode = None
         self.pending_range_start = None
         self.user_defined_range = False
@@ -132,7 +136,9 @@ class TimeSeriesPlot(QtWidgets.QWidget):
         elif event.button() == QtCore.Qt.MouseButton.LeftButton:
             self.drag_mode = "pan"
             self.pan_start_pixel_x = event.position().x()
+            self.pan_start_pixel_y = event.position().y()
             self.pan_start_range = (self.x_min, self.x_max)
+            self.pan_start_y_range = (self.y_min, self.y_max)
             self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event) -> None:
@@ -142,12 +148,22 @@ class TimeSeriesPlot(QtWidgets.QWidget):
         elif (
             self.drag_mode == "pan"
             and self.pan_start_pixel_x is not None
+            and self.pan_start_pixel_y is not None
             and self.pan_start_range is not None
+            and self.pan_start_y_range is not None
             and self.series
         ):
-            pixel_delta = event.position().x() - self.pan_start_pixel_x
-            time_delta = pixel_delta / self._plot_rect().width() * (self.pan_start_range[1] - self.pan_start_range[0])
-            self._set_view_range(self.pan_start_range[0] - time_delta, self.pan_start_range[1] - time_delta)
+            plot_rect = self._plot_rect()
+            pixel_delta_x = event.position().x() - self.pan_start_pixel_x
+            pixel_delta_y = event.position().y() - self.pan_start_pixel_y
+            time_delta = pixel_delta_x / plot_rect.width() * (self.pan_start_range[1] - self.pan_start_range[0])
+            value_delta = pixel_delta_y / plot_rect.height() * (self.pan_start_y_range[1] - self.pan_start_y_range[0])
+            self._set_view_range(
+                self.pan_start_range[0] - time_delta,
+                self.pan_start_range[1] - time_delta,
+                self.pan_start_y_range[0] + value_delta,
+                self.pan_start_y_range[1] + value_delta,
+            )
 
     def mouseReleaseEvent(self, event) -> None:
         if self.drag_mode == "range" and self.drag_start_x is not None and self.series:
@@ -158,7 +174,9 @@ class TimeSeriesPlot(QtWidgets.QWidget):
             self.range_changed.emit(round(start, 1), round(end, 1))
         self.drag_start_x = None
         self.pan_start_pixel_x = None
+        self.pan_start_pixel_y = None
         self.pan_start_range = None
+        self.pan_start_y_range = None
         self.drag_mode = None
         self.unsetCursor()
 
@@ -224,7 +242,13 @@ class TimeSeriesPlot(QtWidgets.QWidget):
         if self.y_max <= self.y_min:
             self.y_max = self.y_min + 1.0
 
-    def _set_view_range(self, start: float, end: float) -> None:
+    def _set_view_range(
+        self,
+        start: float,
+        end: float,
+        y_start: float | None = None,
+        y_end: float | None = None,
+    ) -> None:
         width = end - start
         full_width = self.full_x_max - self.full_x_min
 
@@ -240,6 +264,10 @@ class TimeSeriesPlot(QtWidgets.QWidget):
                 start = end - width
             self.x_min = start
             self.x_max = end
+
+        if y_start is not None and y_end is not None and y_end > y_start:
+            self.y_min = y_start
+            self.y_max = y_end
         self.update()
 
     def _plot_rect(self) -> QtCore.QRectF:
@@ -260,14 +288,18 @@ class TimeSeriesPlot(QtWidgets.QWidget):
         painter.drawText(int(rect.right()) - 55, self.height() - 8, f"{self.x_max:.1f}s")
 
     def _draw_series(self, painter: QtGui.QPainter, rect: QtCore.QRectF, x_values, y_values) -> None:
-        points = []
+        segment = []
         step = max(1, len(x_values) // 1200)
         for x, y in zip(x_values[::step], y_values[::step]):
-            if pd.isna(y):
+            if pd.isna(x) or pd.isna(y):
+                if len(segment) >= 2:
+                    painter.drawPolyline(segment)
+                segment = []
                 continue
-            points.append(QtCore.QPointF(self._x_to_pixel(float(x), rect), self._y_to_pixel(float(y), rect)))
-        if len(points) >= 2:
-            painter.drawPolyline(points)
+            segment.append(QtCore.QPointF(self._x_to_pixel(float(x), rect), self._y_to_pixel(float(y), rect)))
+
+        if len(segment) >= 2:
+            painter.drawPolyline(segment)
 
     def _draw_average_region(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
         start_px = self._x_to_pixel(self.start_s, rect)
@@ -321,7 +353,7 @@ class ImportWorker(QtCore.QThread):
                     csv_dir=self.output_dir,
                 )
             elif suffix == ".csv":
-                pd.read_csv(self.input_path, nrows=5, low_memory=False)
+                read_csv_with_fallback(self.input_path, nrows=5, low_memory=False)
                 result_path = self.input_path
             else:
                 raise ValueError("Only .iad and .csv files are supported.")
@@ -393,6 +425,33 @@ class PreviewDialog(QtWidgets.QDialog):
         return "\n".join(lines)
 
 
+
+def _detect_measurement_header_row(path: Path, encoding: str, limit: int = 200) -> int | None:
+    with path.open("r", encoding=encoding, newline="") as handle:
+        for row_index, line in enumerate(handle):
+            if row_index >= limit:
+                break
+            if ".X" in line and "," in line:
+                return row_index
+    return None
+
+
+def read_csv_with_fallback(path: Path, **kwargs) -> pd.DataFrame:
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "cp949", "euc-kr", "latin1"):
+        try:
+            read_kwargs = dict(kwargs)
+            if read_kwargs.get("header") is None and "skiprows" not in read_kwargs:
+                header_row = _detect_measurement_header_row(path, encoding)
+                if header_row is not None:
+                    read_kwargs["skiprows"] = header_row
+            return pd.read_csv(path, encoding=encoding, **read_kwargs)
+        except (UnicodeDecodeError, pd.errors.ParserError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    return pd.read_csv(path, **kwargs)
+
 def _cell_text(row: pd.Series, index: int) -> str:
     if index >= len(row):
         return ""
@@ -406,6 +465,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.worker: ImportWorker | None = None
+        self.import_progress: QtWidgets.QProgressDialog | None = None
         self.result_path: Path | None = None
         self.input_path: Path | None = None
         self.df = pd.DataFrame()
@@ -491,21 +551,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_2.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
 
         self.label_Averaging_period = QtWidgets.QLabel("Averaging period", self.centralwidget)
-        self.label_Averaging_period.setGeometry(QtCore.QRect(560, 15, 120, 20))
+        self.label_Averaging_period.setGeometry(QtCore.QRect(710, 0, 150, 20))
 
         self.pushButton_Backward = QtWidgets.QPushButton("<<", self.centralwidget)
-        self.pushButton_Backward.setGeometry(QtCore.QRect(580, 40, 40, 25))
+        self.pushButton_Backward.setGeometry(QtCore.QRect(605, 40, 40, 25))
 
         self.pushButton_Forward = QtWidgets.QPushButton(">>", self.centralwidget)
-        self.pushButton_Forward.setGeometry(QtCore.QRect(640, 40, 40, 25))
+        self.pushButton_Forward.setGeometry(QtCore.QRect(660, 40, 40, 25))
 
         self.radioButton_Ten_min = QtWidgets.QRadioButton("10 minutes (default)", self.centralwidget)
-        self.radioButton_Ten_min.setGeometry(QtCore.QRect(710, 20, 170, 15))
+        self.radioButton_Ten_min.setGeometry(QtCore.QRect(710, 20, 170, 18))
         self.radioButton_Ten_min.setChecked(True)
         self.radioButton_Five_min = QtWidgets.QRadioButton("5 minutes", self.centralwidget)
-        self.radioButton_Five_min.setGeometry(QtCore.QRect(710, 40, 140, 15))
+        self.radioButton_Five_min.setGeometry(QtCore.QRect(710, 42, 140, 18))
         self.radioButton_User_defined = QtWidgets.QRadioButton("user-defined", self.centralwidget)
-        self.radioButton_User_defined.setGeometry(QtCore.QRect(710, 60, 140, 15))
+        self.radioButton_User_defined.setGeometry(QtCore.QRect(710, 64, 140, 18))
 
         self.plotWidget = TimeSeriesPlot(self.centralwidget)
         self.plotWidget.setGeometry(QtCore.QRect(460, 110, 420, 315))
@@ -555,31 +615,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tableWidget_Edit_channels.setColumnCount(3)
         self.tableWidget_Edit_channels.setRowCount(4)
         self.tableWidget_Edit_channels.setHorizontalHeaderLabels(["Channel", "Avg", "Avg-Amb"])
-        for row, text in enumerate(["fuel rate", "RAD 전단", "OC 전단", "CAC 전단"]):
+        for row, text in enumerate(["fuel rate", "RAD \uc804\ub2e8", "OC \uc804\ub2e8", "CAC \uc804\ub2e8"]):
             self.tableWidget_Edit_channels.setItem(row, 0, QtWidgets.QTableWidgetItem(text))
 
         self.pushButton_Channels_import = QtWidgets.QPushButton("Import...", self.centralwidget)
         self.pushButton_Channels_import.setGeometry(QtCore.QRect(680, 460, 75, 25))
         self.pushButton_Average_updates = QtWidgets.QPushButton("Averaging\nupdates", self.centralwidget)
-        self.pushButton_Average_updates.setGeometry(QtCore.QRect(780, 490, 100, 70))
+        self.pushButton_Average_updates.setGeometry(QtCore.QRect(780, 490, 100, 56))
         self.pushButton_Clear_all = QtWidgets.QPushButton("Clear all", self.centralwidget)
-        self.pushButton_Clear_all.setGeometry(QtCore.QRect(780, 570, 100, 70))
+        self.pushButton_Clear_all.setGeometry(QtCore.QRect(780, 558, 100, 56))
         self.pushButton_Preview = QtWidgets.QPushButton("Preview...", self.centralwidget)
-        self.pushButton_Preview.setGeometry(QtCore.QRect(780, 690, 100, 70))
+        self.pushButton_Preview.setGeometry(QtCore.QRect(780, 626, 100, 56))
         self.pushButton_Export = QtWidgets.QPushButton("Export...", self.centralwidget)
-        self.pushButton_Export.setGeometry(QtCore.QRect(780, 755, 100, 55))
-        self.pushButton_Exit = QtWidgets.QPushButton("전체종료", self.centralwidget)
-        self.pushButton_Exit.setGeometry(QtCore.QRect(780, 815, 100, 35))
+        self.pushButton_Export.setGeometry(QtCore.QRect(780, 694, 100, 56))
+        self.pushButton_Exit = QtWidgets.QPushButton("\uc804\uccb4\uc885\ub8cc", self.centralwidget)
+        self.pushButton_Exit.setGeometry(QtCore.QRect(780, 762, 100, 56))
 
-        self.label_Start_time = QtWidgets.QLabel("Start s", self.centralwidget)
-        self.label_Start_time.setGeometry(QtCore.QRect(460, 20, 55, 20))
+        self.label_Start_time = QtWidgets.QLabel("Start second", self.centralwidget)
+        self.label_Start_time.setGeometry(QtCore.QRect(430, 20, 80, 20))
         self.doubleSpinBox_Start = QtWidgets.QDoubleSpinBox(self.centralwidget)
         self.doubleSpinBox_Start.setGeometry(QtCore.QRect(515, 18, 75, 24))
         self.doubleSpinBox_Start.setDecimals(1)
         self.doubleSpinBox_Start.setMaximum(999999.0)
 
-        self.label_End_time = QtWidgets.QLabel("End s", self.centralwidget)
-        self.label_End_time.setGeometry(QtCore.QRect(460, 50, 55, 20))
+        self.label_End_time = QtWidgets.QLabel("End second", self.centralwidget)
+        self.label_End_time.setGeometry(QtCore.QRect(430, 50, 80, 20))
         self.doubleSpinBox_End = QtWidgets.QDoubleSpinBox(self.centralwidget)
         self.doubleSpinBox_End.setGeometry(QtCore.QRect(515, 48, 75, 24))
         self.doubleSpinBox_End.setDecimals(1)
@@ -603,6 +663,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_Specials_remove.clicked.connect(self.remove_specials)
         self.pushButton_Average_updates.clicked.connect(self.updating)
         self.pushButton_Clear_all.clicked.connect(self.clearing)
+        self.pushButton_Channels_import.clicked.connect(self.import_channel_list)
         self.pushButton_Preview.clicked.connect(self.previewing)
         self.pushButton_Export.clicked.connect(self.output)
         self.pushButton_Exit.clicked.connect(QtWidgets.QApplication.quit)
@@ -622,6 +683,73 @@ class MainWindow(QtWidgets.QMainWindow):
         if file_path:
             self.lineEdit_Files.setText(file_path)
 
+    def import_channel_list(self) -> None:
+        path_text, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import sensor list",
+            str(Path.home()),
+            "Excel files (*.xlsx *.xlsm);;CSV files (*.csv);;All files (*.*)",
+        )
+        if not path_text:
+            return
+
+        try:
+            channels = self._read_channel_list(Path(path_text))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Import Error", f"Sensor list import failed:\n{exc}")
+            return
+
+        if not channels:
+            QtWidgets.QMessageBox.warning(self, "Import Error", "No channel names were found in the selected file.")
+            return
+
+        self._replace_general_channels(channels)
+        self.statusbar.showMessage(f"Sensor list imported. {len(channels)} display names loaded. Select IAD channels and press > to map.")
+
+    def _read_channel_list(self, path: Path) -> list[str]:
+        suffix = path.suffix.lower()
+        if suffix == ".csv":
+            frame = pd.read_csv(path, header=None)
+        else:
+            frame = pd.read_excel(path, header=None)
+
+        if frame.empty:
+            return []
+
+        channel_column = self._detect_channel_list_column(frame)
+        values = frame.iloc[:, channel_column].dropna()
+        channels: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value).strip()
+            if not text or text.lower() in {"nan", "sensor list", "channel", "channels"}:
+                continue
+            if text in {"\uc13c\uc11c\ub9ac\uc2a4\ud2b8", "\ucc44\ub110", "\ucc44\ub110\uba85"}:
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            channels.append(text)
+        return channels
+
+    def _detect_channel_list_column(self, frame: pd.DataFrame) -> int:
+        for row_index in range(min(len(frame), 10)):
+            for column_index, value in enumerate(frame.iloc[row_index]):
+                text = str(value).strip().lower()
+                if text in {"\uc13c\uc11c\ub9ac\uc2a4\ud2b8", "sensor list", "channel", "channels", "\ucc44\ub110", "\ucc44\ub110\uba85"}:
+                    return column_index
+        if frame.shape[1] >= 2:
+            return 1
+        return 0
+
+    def _replace_general_channels(self, channels: list[str]) -> None:
+        self.tableWidget_Edit_channels.setRowCount(4 + len(channels))
+        for offset, channel_name in enumerate(channels):
+            row = 4 + offset
+            self.tableWidget_Edit_channels.setItem(row, 0, QtWidgets.QTableWidgetItem(channel_name))
+            self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
+            self.tableWidget_Edit_channels.setItem(row, 2, QtWidgets.QTableWidgetItem(""))
+
     def import_file(self) -> None:
         path_text = self.lineEdit_Files.text().strip().strip('"')
         if not path_text:
@@ -639,6 +767,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._reset_import_state()
         self._set_busy(True)
+        self._show_import_progress(input_path)
         self.statusbar.showMessage(f"Importing: {input_path}")
 
         self.worker = ImportWorker(input_path, self.output_dir, self)
@@ -651,16 +780,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusbar.showMessage(f"Import completed: {self.result_path}")
         self._load_result_data(self.result_path)
         self._set_busy(False)
+        self._hide_import_progress()
 
     def import_failed(self, message: str) -> None:
         self.statusbar.showMessage("Import failed")
         self._set_busy(False)
+        self._hide_import_progress()
         QtWidgets.QMessageBox.critical(self, "Import Error", message)
 
     def _load_result_data(self, csv_path: Path) -> None:
         try:
             is_iad = bool(self.input_path and self.input_path.suffix.lower() == ".iad")
-            raw_df = pd.read_csv(csv_path, header=0 if is_iad else None, low_memory=False)
+            raw_df = read_csv_with_fallback(csv_path, header=0 if is_iad else None, low_memory=False)
             self.df = preprocessing(raw_df)
             first_column = str(self.df.columns[0])
 
@@ -742,17 +873,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._check_ready(require_range=True):
             return
 
-        existing = self._existing_table_channels()
-        for item in self.listView_Recording_channels.selectedItems():
-            channel_name = item.text()
-            if channel_name in existing:
-                continue
-            row = self.tableWidget_Edit_channels.rowCount()
-            self.tableWidget_Edit_channels.setRowCount(row + 1)
-            self.tableWidget_Edit_channels.setItem(row, 0, QtWidgets.QTableWidgetItem(channel_name))
-            self._set_general_average_row(row, self.averaging(channel_name), self._ambient_temperature())
-            existing.add(channel_name)
+        selected = [item.text() for item in self.listView_Recording_channels.selectedItems()]
+        if not selected:
+            return
 
+        existing = self._existing_mapped_channels()
+        mapped_count = 0
+        for actual_channel in selected:
+            if actual_channel in existing:
+                continue
+
+            row = self._first_unmapped_general_row()
+            if row is None:
+                row = self.tableWidget_Edit_channels.rowCount()
+                self.tableWidget_Edit_channels.setRowCount(row + 1)
+                self.tableWidget_Edit_channels.setItem(row, 0, QtWidgets.QTableWidgetItem(actual_channel))
+
+            self._set_actual_channel(row, actual_channel)
+            self._set_general_average_row(row, self.averaging(actual_channel), self._ambient_temperature())
+            existing.add(actual_channel)
+            mapped_count += 1
+
+        if mapped_count:
+            self.statusbar.showMessage(f"Mapped {mapped_count} IAD channels to display names.")
     def remove_channels(self) -> None:
         rows = sorted({index.row() for index in self.tableWidget_Edit_channels.selectedIndexes()}, reverse=True)
         for row in rows:
@@ -770,18 +913,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusbar.showMessage("Averaging values updated.")
 
     def _refresh_average_table(self) -> None:
-        for row in range(4, self.tableWidget_Edit_channels.rowCount()):
-            item = self.tableWidget_Edit_channels.item(row, 0)
-            if item and item.text().strip():
-                value = self.averaging(item.text().strip())
-                self._set_general_average_row(row, value, self._ambient_temperature())
-
         ref_temp = self._ambient_temperature()
+        for row in range(4, self.tableWidget_Edit_channels.rowCount()):
+            actual_channel = self._actual_channel_for_row(row)
+            if not actual_channel:
+                self._clear_general_average_row(row)
+                continue
+            try:
+                value = self.averaging(actual_channel)
+            except (KeyError, ValueError):
+                self._clear_general_average_row(row)
+                continue
+            self._set_general_average_row(row, value, ref_temp)
+
         self._update_special_row(0, self.fuel_channel, ref_temp, relative=False)
         self._update_special_row(1, self.RAD_channels, ref_temp, relative=True)
         self._update_special_row(2, self.OC_channels, ref_temp, relative=True)
         self._update_special_row(3, self.CAC_channels, ref_temp, relative=True)
-
     def add_specials(self) -> None:
         if not self._check_ready(require_range=True):
             return
@@ -820,7 +968,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.OC_channels = []
         self.CAC_channels = []
         self.tableWidget_Edit_channels.setRowCount(4)
-        for row, text in enumerate(["fuel rate", "RAD 전단", "OC 전단", "CAC 전단"]):
+        for row, text in enumerate(["fuel rate", "RAD \uc804\ub2e8", "OC \uc804\ub2e8", "CAC \uc804\ub2e8"]):
             self.tableWidget_Edit_channels.setItem(row, 0, QtWidgets.QTableWidgetItem(text))
             self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
             self.tableWidget_Edit_channels.setItem(row, 2, QtWidgets.QTableWidgetItem(""))
@@ -878,6 +1026,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self.input_path,
         )
         self.statusbar.showMessage(f"Excel exported: {file_path}")
+
+    def _show_import_progress(self, input_path: Path) -> None:
+        self._hide_import_progress()
+        progress = QtWidgets.QProgressDialog(self)
+        progress.setWindowTitle("Importing IAD")
+        progress.setLabelText(f"Importing and converting...\n{input_path.name}")
+        progress.setCancelButton(None)
+        progress.setWindowFlag(QtCore.Qt.WindowType.WindowCloseButtonHint, False)
+        progress.setRange(0, 0)
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        self.import_progress = progress
+        progress.show()
+        QtWidgets.QApplication.processEvents()
+
+    def _hide_import_progress(self) -> None:
+        if self.import_progress is not None:
+            self.import_progress.close()
+            self.import_progress.deleteLater()
+            self.import_progress = None
 
     def _set_busy(self, busy: bool) -> None:
         self.pushButton_Files.setEnabled(not busy)
@@ -945,8 +1116,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     "x": pd.to_numeric(df[time_column], errors="coerce"),
                     "y": pd.to_numeric(df[channel_name], errors="coerce"),
                 }
-            ).dropna()
-            if plot_df.empty:
+            )
+            plot_df = plot_df[plot_df["x"].notna()].copy()
+            if plot_df.empty or plot_df["y"].notna().sum() == 0:
                 return None
             return {
                 "name": channel_name,
@@ -965,9 +1137,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 name = str(column)
                 if not name or name.startswith("Unnamed") or name in seen:
                     continue
+                if not self._channel_has_any_numeric_value(df, column):
+                    continue
                 seen.add(name)
                 channels.append(name)
         return channels
+
+    def _channel_has_any_numeric_value(self, df: pd.DataFrame, column: str) -> bool:
+        return pd.to_numeric(df[column], errors="coerce").notna().any()
 
     def _groups(self) -> dict[int, pd.DataFrame]:
         return {
@@ -991,6 +1168,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 existing.add(item.text().strip())
         return existing
 
+    def _existing_mapped_channels(self) -> set[str]:
+        existing = set()
+        for row in range(4, self.tableWidget_Edit_channels.rowCount()):
+            actual_channel = self._actual_channel_for_row(row)
+            if actual_channel:
+                existing.add(actual_channel)
+        return existing
+
+    def _first_unmapped_general_row(self) -> int | None:
+        for row in range(4, self.tableWidget_Edit_channels.rowCount()):
+            item = self.tableWidget_Edit_channels.item(row, 0)
+            if item and item.text().strip() and not item.data(QtCore.Qt.ItemDataRole.UserRole):
+                return row
+        return None
+
+    def _actual_channel_for_row(self, row: int) -> str:
+        item = self.tableWidget_Edit_channels.item(row, 0)
+        if not item:
+            return ""
+        mapped = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        return str(mapped).strip() if mapped else item.text().strip()
+
+    def _set_actual_channel(self, row: int, actual_channel: str) -> None:
+        item = self.tableWidget_Edit_channels.item(row, 0)
+        if item is None:
+            item = QtWidgets.QTableWidgetItem(actual_channel)
+            self.tableWidget_Edit_channels.setItem(row, 0, item)
+        item.setData(QtCore.Qt.ItemDataRole.UserRole, actual_channel)
+        item.setToolTip(f"IAD channel: {actual_channel}")
     def _ambient_temperature(self) -> float:
         text = self.info_edits[7].text().strip()
         return float(text) if text else 0.0
@@ -999,10 +1205,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(str(mean_value)))
         self.tableWidget_Edit_channels.setItem(row, 2, QtWidgets.QTableWidgetItem(str(round(mean_value - ref_temp, 1))))
 
+    def _clear_general_average_row(self, row: int) -> None:
+        self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
+        self.tableWidget_Edit_channels.setItem(row, 2, QtWidgets.QTableWidgetItem(""))
     def _update_special_row(self, row: int, channels: list[str], ref_temp: float, relative: bool) -> None:
         if not channels:
             return
-        values = [self.averaging(channel) for channel in channels]
+        values = []
+        for channel in channels:
+            try:
+                values.append(self.averaging(channel))
+            except (KeyError, ValueError):
+                continue
+        if not values:
+            return
         mean_value = round(sum(values) / len(values), 1)
         self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(str(mean_value)))
         if relative:

@@ -200,9 +200,13 @@ def parse_channels(xml_path: str | Path) -> pd.DataFrame:
         elif data_size is not None:
             channel_type = "physical"
             if data_size == 2:
-                dtype = "int16"
+                dtype = _dtype_from_data_type(data_type)
+                if dtype not in {"int16", "uint16"}:
+                    dtype = "int16"
             elif data_size == 4:
-                dtype = "float32"
+                dtype = _dtype_from_data_type(data_type)
+                if dtype != "float32":
+                    dtype = "float32"
             else:
                 dtype = "unknown"
             scale, offset, formula = build_conversion(
@@ -317,6 +321,7 @@ def cha_to_dataframe(
 def _read_physical_cha(cha_path: str | Path, dtype: str) -> np.ndarray:
     dtype_map = {
         "int16": np.dtype("<i2"),
+        "uint16": np.dtype("<u2"),
         "float32": np.dtype("<f4"),
     }
     if dtype not in dtype_map:
