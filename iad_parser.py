@@ -292,7 +292,8 @@ def cha_to_dataframe(
     no_value = meta.get("noValueValue")
     if pd.notna(no_value):
         raw[raw == float(no_value)] = np.nan
-
+        if meta.get("channel_type") == "scaled_physical" and float(no_value) == 128.0:
+            raw[raw == float(np.iinfo(np.int16).min)] = np.nan
     if n_samples is not None:
         raw = raw[:n_samples]
 
@@ -310,8 +311,9 @@ def cha_to_dataframe(
     df = pd.DataFrame({"time_s": time_s, meta["name"]: physical})
 
     if drop_initial_seconds > 0:
-        df = df[df["time_s"] >= drop_initial_seconds].copy()
-        df["time_s"] -= drop_initial_seconds
+        keep = df["time_s"].isna() | (df["time_s"] >= drop_initial_seconds)
+        df = df[keep].copy()
+        df.loc[df["time_s"].notna(), "time_s"] -= drop_initial_seconds
         df.reset_index(drop=True, inplace=True)
 
     return df
@@ -349,22 +351,12 @@ def _read_scaled_physical_cha(cha_path: str | Path, dtype: str, meta: dict) -> t
     value_count = meta.get("valueCountX")
     value_count = int(value_count) if pd.notna(value_count) else None
 
-    if value_count is not None:
-        record_size = 8 + np_dtype.itemsize
-        expected_record_bytes = value_count * record_size
-        if len(data) == expected_record_bytes:
-            record_dtype = np.dtype([("time_ticks", "<u8"), ("raw", np_dtype)])
-            records = np.frombuffer(data, dtype=record_dtype)
-            ticks = records["time_ticks"].astype(float)
-            diffs = np.diff(ticks)
-            diffs = diffs[diffs > 0]
-            step_s = float(np.median(diffs) / 10_000_000.0) if len(diffs) else 0.0
-            if step_s > 0:
-                time_s = np.arange(len(records), dtype=float) * step_s
-            else:
-                time_s = None
-            return records["raw"].copy(), time_s
+    for candidate_dtype in _scaled_physical_record_dtypes(np_dtype):
+        record = _try_read_timestamped_records(data, candidate_dtype, value_count)
+        if record is not None:
+            return record
 
+    if value_count is not None:
         expected_bytes = value_count * np_dtype.itemsize
         extra_bytes = len(data) - expected_bytes
         if extra_bytes >= 0:
@@ -373,6 +365,54 @@ def _read_scaled_physical_cha(cha_path: str | Path, dtype: str, meta: dict) -> t
 
     return np.frombuffer(data, dtype=np_dtype).copy(), None
 
+
+def _scaled_physical_record_dtypes(np_dtype: np.dtype) -> list[np.dtype]:
+    candidates = [np_dtype, np.dtype("<i2"), np.dtype("<u2"), np.dtype("u1"), np.dtype("<f4")]
+    unique: list[np.dtype] = []
+    for candidate in candidates:
+        if all(candidate != existing for existing in unique):
+            unique.append(candidate)
+    return unique
+
+
+def _try_read_timestamped_records(
+    data: bytes,
+    np_dtype: np.dtype,
+    value_count: int | None,
+) -> tuple[np.ndarray, np.ndarray | None] | None:
+    record_size = 8 + np_dtype.itemsize
+    if value_count is not None:
+        if len(data) != value_count * record_size:
+            return None
+        count = value_count
+    else:
+        if len(data) < record_size * 2 or len(data) % record_size != 0:
+            return None
+        count = len(data) // record_size
+
+    record_dtype = np.dtype([("time_ticks", "<u8"), ("raw", np_dtype)])
+    records = np.frombuffer(data, dtype=record_dtype, count=count)
+    ticks = records["time_ticks"].astype(float)
+    diffs = np.diff(ticks)
+    positive_diffs = diffs[diffs > 0]
+    if len(positive_diffs) == 0 or len(positive_diffs) < max(1, int(len(diffs) * 0.8)):
+        return None
+
+    step_s = float(np.median(positive_diffs) / 10_000_000.0)
+    if not np.isfinite(step_s) or step_s <= 0 or step_s > 3600:
+        return None
+
+    invalid_ticks = ticks >= float(np.iinfo(np.int64).max)
+    valid_ticks = ticks[~invalid_ticks]
+    if len(valid_ticks) == 0:
+        return None
+
+    time_s = np.full(len(records), np.nan, dtype=float)
+    time_s[~invalid_ticks] = (valid_ticks - valid_ticks[0]) / 10_000_000.0
+    raw = records["raw"].copy()
+    if np.issubdtype(raw.dtype, np.signedinteger):
+        raw[invalid_ticks] = np.iinfo(raw.dtype).min
+    return raw, time_s
 
 
 def _is_media_channel(name: str, values: dict, data_type: int | None) -> bool:

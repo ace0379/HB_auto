@@ -290,16 +290,37 @@ class TimeSeriesPlot(QtWidgets.QWidget):
     def _draw_series(self, painter: QtGui.QPainter, rect: QtCore.QRectF, x_values, y_values) -> None:
         segment = []
         step = max(1, len(x_values) // 1200)
+        max_draw_gap = self._max_draw_gap(x_values, step)
+        previous_x: float | None = None
+
         for x, y in zip(x_values[::step], y_values[::step]):
             if pd.isna(x) or pd.isna(y):
                 if len(segment) >= 2:
                     painter.drawPolyline(segment)
                 segment = []
+                previous_x = None
                 continue
-            segment.append(QtCore.QPointF(self._x_to_pixel(float(x), rect), self._y_to_pixel(float(y), rect)))
+
+            x_float = float(x)
+            if previous_x is not None and max_draw_gap is not None and x_float - previous_x > max_draw_gap:
+                if len(segment) >= 2:
+                    painter.drawPolyline(segment)
+                segment = []
+
+            segment.append(QtCore.QPointF(self._x_to_pixel(x_float, rect), self._y_to_pixel(float(y), rect)))
+            previous_x = x_float
 
         if len(segment) >= 2:
             painter.drawPolyline(segment)
+
+    def _max_draw_gap(self, x_values, draw_step: int) -> float | None:
+        x_series = pd.Series(x_values).dropna()
+        diffs = x_series.diff().dropna()
+        diffs = diffs[diffs > 0]
+        if diffs.empty:
+            return None
+        normal_step = float(diffs.median())
+        return normal_step * max(draw_step + 0.5, 1.5)
 
     def _draw_average_region(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
         start_px = self._x_to_pixel(self.start_s, rect)

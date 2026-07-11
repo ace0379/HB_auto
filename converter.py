@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 import shutil
+
+import numpy as np
 import zipfile
 
 import pandas as pd
@@ -153,12 +155,72 @@ def _build_rate_dataframe(
             base_time = df["time_s"].values
             df_rate = df[["time_s"]].copy()
         else:
-            min_len = min(len(df), len(base_time), len(df_rate))
-            df = df.iloc[:min_len].copy()
-            df_rate = df_rate.iloc[:min_len].copy()
-            base_time = base_time[:min_len]
-            df["time_s"] = base_time
+            df = _align_channel_to_base_time(df, base_time)
 
-        df_rate = df_rate.merge(df, on="time_s", how="left")
+        for column in df.columns:
+            if column == "time_s":
+                continue
+            df_rate[column] = df[column].to_numpy()
 
     return df_rate
+
+
+def _align_channel_to_base_time(df: pd.DataFrame, base_time) -> pd.DataFrame:
+    if _time_axis_matches(df["time_s"], base_time):
+        aligned = df.copy()
+        aligned["time_s"] = base_time
+        return aligned
+
+    base_df = pd.DataFrame({"time_s": base_time})
+    if df.empty:
+        return base_df
+
+    result = base_df.copy()
+    result["_base_index"] = result.index
+    valid_base = result[result["time_s"].notna()].copy()
+    valid_df = df[df["time_s"].notna()].copy()
+    value_columns = [column for column in df.columns if column != "time_s"]
+    if valid_base.empty or valid_df.empty:
+        for column in value_columns:
+            result[column] = np.nan
+        return result.drop(columns=["_base_index"])
+
+    base_times = pd.Series(base_time).dropna()
+    diffs = base_times.diff().dropna()
+    diffs = diffs[diffs > 0]
+    tolerance = float(diffs.median() / 2) if not diffs.empty else 1e-9
+
+    # Allow tiny logger/module timestamp offsets, but never carry values across
+    # measurement-stop or no-value gaps that exceed half a sample period.
+    aligned = pd.merge_asof(
+        valid_base.sort_values("time_s"),
+        valid_df.sort_values("time_s"),
+        on="time_s",
+        direction="nearest",
+        tolerance=tolerance,
+    ).set_index("_base_index")
+
+    for column in value_columns:
+        result[column] = aligned[column]
+
+    return result.drop(columns=["_base_index"])
+
+
+def _time_axis_matches(channel_time, base_time) -> bool:
+    if len(channel_time) != len(base_time):
+        return False
+
+    channel_series = pd.Series(channel_time)
+    base_series = pd.Series(base_time)
+    channel_missing = channel_series.isna().to_numpy()
+    base_missing = base_series.isna().to_numpy()
+    if not np.array_equal(channel_missing, base_missing):
+        return False
+
+    valid = ~base_missing
+    return np.allclose(
+        channel_series.to_numpy()[valid],
+        base_series.to_numpy()[valid],
+        rtol=0,
+        atol=1e-9,
+    )

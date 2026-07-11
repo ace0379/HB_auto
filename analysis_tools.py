@@ -44,39 +44,113 @@ def preprocessing(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def determine_time_step(time_series: pd.Series) -> float:
-    return float(np.nanmean(np.diff(time_series)))
+    numeric = pd.to_numeric(time_series, errors="coerce").dropna()
+    diffs = numeric.diff().dropna()
+    diffs = diffs[diffs > 0]
+    if diffs.empty:
+        return float("nan")
+    return float(diffs.median())
 
 
 def first_type(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    grouped_ones: dict[str, pd.Series] = {}
-    grouped_tens: dict[str, pd.Series] = {}
-    grouped_hundreds: dict[str, pd.Series] = {}
+    grouped: dict[int, dict[str, pd.Series]] = {
+        1: {},
+        10: {},
+        100: {},
+    }
+    time_values: dict[int, list[pd.Series]] = {
+        1: [],
+        10: [],
+        100: [],
+    }
+    channel_entries: dict[int, list[tuple[str, pd.Series, pd.Series]]] = {
+        1: [],
+        10: [],
+        100: [],
+    }
 
-    time_columns = [column for column in df.columns if str(column).endswith(".X")]
-    time_step_map = {}
-    for column in time_columns:
-        time_step = determine_time_step(df[column])
-        time_step_map[column] = time_step
-
-        if 0.9 < time_step < 1.1:
-            grouped_ones["Time_1Hz"] = df[column]
-        elif 0.09 < time_step < 0.11:
-            grouped_tens["Time_10Hz"] = df[column]
-        elif 0.009 < time_step < 0.011:
-            grouped_hundreds["Time_100Hz"] = df[column]
-
-    for column in df.columns:
-        if column in time_step_map:
+    columns = list(df.columns)
+    for index, column in enumerate(columns):
+        time_column = str(column).strip()
+        if not time_column.endswith(".X"):
             continue
-        for _, time_step in time_step_map.items():
-            if 0.9 < time_step < 1.1:
-                grouped_ones[column] = df[column]
-            elif 0.09 < time_step < 0.11:
-                grouped_tens[column] = df[column]
-            elif 0.009 < time_step < 0.011:
-                grouped_hundreds[column] = df[column]
 
-    return pd.DataFrame(grouped_ones), pd.DataFrame(grouped_tens), pd.DataFrame(grouped_hundreds)
+        rate = _rate_from_time_step(determine_time_step(df[column]))
+        if rate is None:
+            continue
+
+        value_column = _companion_value_column(time_column, columns)
+        if value_column is None:
+            continue
+
+        times = pd.to_numeric(df[column], errors="coerce")
+        values = pd.to_numeric(df[value_column], errors="coerce")
+        time_values[rate].append(times.dropna())
+        channel_entries[rate].append((str(value_column), times, values))
+
+    for rate, entries in channel_entries.items():
+        if not entries or not time_values[rate]:
+            continue
+
+        time_label = f"Time_{rate}Hz"
+        base_time = _select_base_time_axis(time_values[rate])
+        grouped[rate][time_label] = pd.Series(base_time)
+
+        for channel_name, times, values in entries:
+            grouped[rate][channel_name] = _align_values_to_time_axis(base_time, times, values)
+
+    return pd.DataFrame(grouped[1]), pd.DataFrame(grouped[10]), pd.DataFrame(grouped[100])
+
+
+def _rate_from_time_step(time_step: float) -> int | None:
+    if 0.9 < time_step < 1.1:
+        return 1
+    if 0.09 < time_step < 0.11:
+        return 10
+    if 0.009 < time_step < 0.011:
+        return 100
+    return None
+
+
+def _companion_value_column(time_column: str, columns: list) -> object | None:
+    channel_name = time_column[:-2]
+    for candidate in columns:
+        if str(candidate).strip() == channel_name:
+            return candidate
+    return None
+
+
+def _select_base_time_axis(time_series_list: list[pd.Series]) -> np.ndarray:
+    longest = max(time_series_list, key=len)
+    return longest.reset_index(drop=True).to_numpy(dtype=float)
+
+
+def _align_values_to_time_axis(base_time: np.ndarray, times: pd.Series, values: pd.Series) -> pd.Series:
+    result = pd.Series(np.nan, index=range(len(base_time)), dtype=float)
+    valid = pd.DataFrame(
+        {
+            "time": pd.to_numeric(times, errors="coerce"),
+            "value": pd.to_numeric(values, errors="coerce"),
+        }
+    ).dropna(subset=["time"])
+    if valid.empty or len(base_time) == 0:
+        return result
+
+    base = pd.DataFrame({"time": base_time, "_base_index": range(len(base_time))})
+    base_times = pd.Series(base_time).dropna()
+    diffs = base_times.diff().dropna()
+    diffs = diffs[diffs > 0]
+    tolerance = float(diffs.median() / 2) if not diffs.empty else 1e-9
+
+    aligned = pd.merge_asof(
+        base.sort_values("time"),
+        valid.sort_values("time"),
+        on="time",
+        direction="nearest",
+        tolerance=tolerance,
+    ).set_index("_base_index")
+    result.loc[aligned.index] = aligned["value"]
+    return result.reset_index(drop=True)
 
 
 def second_type(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

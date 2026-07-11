@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6 - 2026-07-11
+
+- Preserved real timestamp gaps from IAD files so measurement-stop periods are not compressed.
+- Kept no-value samples as blank values instead of filling or interpolating nearby temperatures.
+- Improved timestamped scaled-physical CHA parsing, including int16 raw records with no-value sentinels.
+- Updated original IPEmotion CSV grouping to honor each channel's own .X time column when plotting and averaging.
+- Broke graph lines across missing samples or large time gaps so disconnected measurements are shown as blanks.
 ## 0.1.5 - 2026-07-05
 
 - Fixed unsigned 16-bit physical IAD channels so temperature channels no longer convert to inflated values.
