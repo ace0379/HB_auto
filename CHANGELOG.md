@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 - 2026-09-13
+
+- Pinned PyQt6 to 6.7.1 and PyInstaller to 6.22.3 for more compatible Windows release builds.
+- Disabled UPX compression in release builds to avoid altering bundled Qt DLLs.
+- Added HB_BUILD_PYTHON support to the release script so compatibility builds can use a dedicated virtual environment.
+
 ## 0.7 - 2026-09-13
 
 - Added TMC and AOC to the front-air temperature special channel options.
@@ -55,3 +61,4 @@
 - Added graph zoom, pan, and double-click averaging range selection.
 - Added ambient-temperature adjusted average output column.
 - Added source file and averaging time comments to exported Excel.
+

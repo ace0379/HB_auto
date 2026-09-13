@@ -19,6 +19,10 @@ $ReleaseRoot = Join-Path $Root "release"
 $PackageDir = Join-Path $ReleaseRoot "${AppName}_v$Version"
 $AppDir = Join-Path $PackageDir "app"
 $InstallerSrc = Join-Path $Root "installer"
+$PythonExe = $env:HB_BUILD_PYTHON
+if (-not $PythonExe) {
+    $PythonExe = "python"
+}
 
 if ($Clean) {
     Remove-Item -LiteralPath (Join-Path $Root "build") -Recurse -Force -ErrorAction SilentlyContinue
@@ -34,6 +38,7 @@ $PyInstallerArgs = @(
     "--clean",
     "--windowed",
     "--onedir",
+    "--noupx",
     "--name", $AppName
 )
 if ($NoArchive) {
@@ -41,7 +46,7 @@ if ($NoArchive) {
 }
 $PyInstallerArgs += "main.py"
 
-python @PyInstallerArgs
+& $PythonExe @PyInstallerArgs
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
@@ -79,3 +84,4 @@ if (-not $NoPackageZip) {
     Write-Host ""
     Write-Host "No zip file was created. Copy the whole package folder to the target PC and run install.cmd."
 }
+
