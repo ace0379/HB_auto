@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7 - 2026-09-13
+
+- Added TMC and AOC to the front-air temperature special channel options.
+- Changed fuel rate, RAD, OC, CAC, TMC, and AOC rows so they appear in Edit channel names only after the user assigns them.
+- Kept assigned special channels sorted at the top in the fixed order: fuel rate, RAD, OC, CAC, TMC, AOC.
+- Preserved general channel rows below the assigned special rows when special channels are added or removed.
 ## 0.1.6 - 2026-07-11
 
 - Preserved real timestamp gaps from IAD files so measurement-stop periods are not compressed.

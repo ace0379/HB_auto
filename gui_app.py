@@ -473,6 +473,18 @@ def read_csv_with_fallback(path: Path, **kwargs) -> pd.DataFrame:
         raise last_error
     return pd.read_csv(path, **kwargs)
 
+
+SPECIAL_CHANNEL_ROWS = [
+    ("fuel rate", "fuel_channel", False),
+    ("RAD \uc804\ub2e8", "RAD_channels", True),
+    ("OC \uc804\ub2e8", "OC_channels", True),
+    ("CAC \uc804\ub2e8", "CAC_channels", True),
+    ("TMC \uc804\ub2e8", "TMC_channels", True),
+    ("AOC \uc804\ub2e8", "AOC_channels", True),
+]
+SPECIAL_CHANNEL_COUNT = len(SPECIAL_CHANNEL_ROWS)
+
+
 def _cell_text(row: pd.Series, index: int) -> str:
     if index >= len(row):
         return ""
@@ -497,6 +509,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.RAD_channels: list[str] = []
         self.OC_channels: list[str] = []
         self.CAC_channels: list[str] = []
+        self.TMC_channels: list[str] = []
+        self.AOC_channels: list[str] = []
         self.isPlotted = False
         self.header_df = pd.DataFrame()
         self.average_baseline_s: float | None = None
@@ -623,7 +637,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.comboBox_Specials = QtWidgets.QComboBox(self.centralwidget)
         self.comboBox_Specials.setGeometry(QtCore.QRect(360, 720, 80, 22))
-        self.comboBox_Specials.addItems(["fuel rate", "RAD", "OC", "CAC"])
+        self.comboBox_Specials.addItems([label.split()[0] if label != "fuel rate" else label for label, _, _ in SPECIAL_CHANNEL_ROWS])
         self.pushButton_Specials_add = QtWidgets.QPushButton(">", self.centralwidget)
         self.pushButton_Specials_add.setGeometry(QtCore.QRect(360, 750, 80, 30))
         self.pushButton_Specials_remove = QtWidgets.QPushButton("<", self.centralwidget)
@@ -634,10 +648,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tableWidget_Edit_channels = QtWidgets.QTableWidget(self.centralwidget)
         self.tableWidget_Edit_channels.setGeometry(QtCore.QRect(460, 490, 291, 351))
         self.tableWidget_Edit_channels.setColumnCount(3)
-        self.tableWidget_Edit_channels.setRowCount(4)
+        self.tableWidget_Edit_channels.setRowCount(0)
         self.tableWidget_Edit_channels.setHorizontalHeaderLabels(["Channel", "Avg", "Avg-Amb"])
-        for row, text in enumerate(["fuel rate", "RAD \uc804\ub2e8", "OC \uc804\ub2e8", "CAC \uc804\ub2e8"]):
-            self.tableWidget_Edit_channels.setItem(row, 0, QtWidgets.QTableWidgetItem(text))
 
         self.pushButton_Channels_import = QtWidgets.QPushButton("Import...", self.centralwidget)
         self.pushButton_Channels_import.setGeometry(QtCore.QRect(680, 460, 75, 25))
@@ -764,9 +776,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return 0
 
     def _replace_general_channels(self, channels: list[str]) -> None:
-        self.tableWidget_Edit_channels.setRowCount(4 + len(channels))
+        self.tableWidget_Edit_channels.setRowCount(self._special_row_count() + len(channels))
         for offset, channel_name in enumerate(channels):
-            row = 4 + offset
+            row = self._special_row_count() + offset
             self.tableWidget_Edit_channels.setItem(row, 0, QtWidgets.QTableWidgetItem(channel_name))
             self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
             self.tableWidget_Edit_channels.setItem(row, 2, QtWidgets.QTableWidgetItem(""))
@@ -920,7 +932,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def remove_channels(self) -> None:
         rows = sorted({index.row() for index in self.tableWidget_Edit_channels.selectedIndexes()}, reverse=True)
         for row in rows:
-            if row >= 4:
+            if row >= self._special_row_count():
                 self.tableWidget_Edit_channels.removeRow(row)
 
     def averaging(self, channel_name: str) -> float:
@@ -935,7 +947,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_average_table(self) -> None:
         ref_temp = self._ambient_temperature()
-        for row in range(4, self.tableWidget_Edit_channels.rowCount()):
+        for row in range(self._special_row_count(), self.tableWidget_Edit_channels.rowCount()):
             actual_channel = self._actual_channel_for_row(row)
             if not actual_channel:
                 self._clear_general_average_row(row)
@@ -947,10 +959,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             self._set_general_average_row(row, value, ref_temp)
 
-        self._update_special_row(0, self.fuel_channel, ref_temp, relative=False)
-        self._update_special_row(1, self.RAD_channels, ref_temp, relative=True)
-        self._update_special_row(2, self.OC_channels, ref_temp, relative=True)
-        self._update_special_row(3, self.CAC_channels, ref_temp, relative=True)
+        for row, (_, attr_name, relative) in enumerate(self._active_special_entries()):
+            self._update_special_row(row, getattr(self, attr_name), ref_temp, relative=relative)
+
     def add_specials(self) -> None:
         if not self._check_ready(require_range=True):
             return
@@ -960,39 +971,27 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         index = self.comboBox_Specials.currentIndex()
-        if index == 0:
-            self.fuel_channel = selected[:1]
-        elif index == 1:
-            self.RAD_channels = selected
-        elif index == 2:
-            self.OC_channels = selected
-        elif index == 3:
-            self.CAC_channels = selected
+        if 0 <= index < SPECIAL_CHANNEL_COUNT:
+            _, attr_name, _ = SPECIAL_CHANNEL_ROWS[index]
+            setattr(self, attr_name, selected[:1] if attr_name == "fuel_channel" else selected)
+            self._rebuild_special_rows()
         self.updating()
 
     def remove_specials(self) -> None:
         index = self.comboBox_Specials.currentIndex()
-        if index == 0:
-            self.fuel_channel = []
-        elif index == 1:
-            self.RAD_channels = []
-        elif index == 2:
-            self.OC_channels = []
-        elif index == 3:
-            self.CAC_channels = []
-        self.tableWidget_Edit_channels.setItem(index, 1, QtWidgets.QTableWidgetItem(""))
-        self.tableWidget_Edit_channels.setItem(index, 2, QtWidgets.QTableWidgetItem(""))
+        if 0 <= index < SPECIAL_CHANNEL_COUNT:
+            _, attr_name, _ = SPECIAL_CHANNEL_ROWS[index]
+            setattr(self, attr_name, [])
+            self._rebuild_special_rows()
 
     def clearing(self) -> None:
         self.fuel_channel = []
         self.RAD_channels = []
         self.OC_channels = []
         self.CAC_channels = []
-        self.tableWidget_Edit_channels.setRowCount(4)
-        for row, text in enumerate(["fuel rate", "RAD \uc804\ub2e8", "OC \uc804\ub2e8", "CAC \uc804\ub2e8"]):
-            self.tableWidget_Edit_channels.setItem(row, 0, QtWidgets.QTableWidgetItem(text))
-            self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
-            self.tableWidget_Edit_channels.setItem(row, 2, QtWidgets.QTableWidgetItem(""))
+        self.TMC_channels = []
+        self.AOC_channels = []
+        self.tableWidget_Edit_channels.setRowCount(0)
 
     def _reset_import_state(self) -> None:
         self.df = pd.DataFrame()
@@ -1181,6 +1180,64 @@ class MainWindow(QtWidgets.QMainWindow):
                 max_time = max(max_time, float(pd.to_numeric(df.iloc[:, 0], errors="coerce").max()))
         return max_time
 
+
+    def _active_special_entries(self) -> list[tuple[str, str, bool]]:
+        return [entry for entry in SPECIAL_CHANNEL_ROWS if getattr(self, entry[1])]
+
+    def _special_row_count(self) -> int:
+        return len(self._active_special_entries())
+
+    def _table_special_row_count(self) -> int:
+        special_labels = {label for label, _, _ in SPECIAL_CHANNEL_ROWS}
+        count = 0
+        for row in range(self.tableWidget_Edit_channels.rowCount()):
+            item = self.tableWidget_Edit_channels.item(row, 0)
+            if item is None or item.text().strip() not in special_labels:
+                break
+            count += 1
+        return count
+
+    def _general_row_payloads(self) -> list[tuple[str, object, str, str]]:
+        rows = []
+        for row in range(self._table_special_row_count(), self.tableWidget_Edit_channels.rowCount()):
+            channel_item = self.tableWidget_Edit_channels.item(row, 0)
+            if channel_item is None:
+                continue
+            value_item = self.tableWidget_Edit_channels.item(row, 1)
+            relative_item = self.tableWidget_Edit_channels.item(row, 2)
+            rows.append(
+                (
+                    channel_item.text(),
+                    channel_item.data(QtCore.Qt.ItemDataRole.UserRole),
+                    value_item.text() if value_item else "",
+                    relative_item.text() if relative_item else "",
+                )
+            )
+        return rows
+
+    def _rebuild_special_rows(self) -> None:
+        general_rows = self._general_row_payloads()
+        active_specials = self._active_special_entries()
+        self.tableWidget_Edit_channels.setRowCount(len(active_specials) + len(general_rows))
+
+        for row, (label, _, _) in enumerate(active_specials):
+            item = QtWidgets.QTableWidgetItem(label)
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            self.tableWidget_Edit_channels.setItem(row, 0, item)
+            self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
+            self.tableWidget_Edit_channels.setItem(row, 2, QtWidgets.QTableWidgetItem(""))
+
+        start_row = len(active_specials)
+        for offset, (label, actual_channel, avg_text, relative_text) in enumerate(general_rows):
+            row = start_row + offset
+            item = QtWidgets.QTableWidgetItem(label)
+            if actual_channel:
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, actual_channel)
+                item.setToolTip(f"IAD channel: {actual_channel}")
+            self.tableWidget_Edit_channels.setItem(row, 0, item)
+            self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(avg_text))
+            self.tableWidget_Edit_channels.setItem(row, 2, QtWidgets.QTableWidgetItem(relative_text))
+
     def _existing_table_channels(self) -> set[str]:
         existing = set()
         for row in range(self.tableWidget_Edit_channels.rowCount()):
@@ -1191,14 +1248,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _existing_mapped_channels(self) -> set[str]:
         existing = set()
-        for row in range(4, self.tableWidget_Edit_channels.rowCount()):
+        for row in range(self._special_row_count(), self.tableWidget_Edit_channels.rowCount()):
             actual_channel = self._actual_channel_for_row(row)
             if actual_channel:
                 existing.add(actual_channel)
         return existing
 
     def _first_unmapped_general_row(self) -> int | None:
-        for row in range(4, self.tableWidget_Edit_channels.rowCount()):
+        for row in range(self._special_row_count(), self.tableWidget_Edit_channels.rowCount()):
             item = self.tableWidget_Edit_channels.item(row, 0)
             if item and item.text().strip() and not item.data(QtCore.Qt.ItemDataRole.UserRole):
                 return row
@@ -1218,6 +1275,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tableWidget_Edit_channels.setItem(row, 0, item)
         item.setData(QtCore.Qt.ItemDataRole.UserRole, actual_channel)
         item.setToolTip(f"IAD channel: {actual_channel}")
+
     def _ambient_temperature(self) -> float:
         text = self.info_edits[7].text().strip()
         return float(text) if text else 0.0
@@ -1229,6 +1287,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _clear_general_average_row(self, row: int) -> None:
         self.tableWidget_Edit_channels.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
         self.tableWidget_Edit_channels.setItem(row, 2, QtWidgets.QTableWidgetItem(""))
+
     def _update_special_row(self, row: int, channels: list[str], ref_temp: float, relative: bool) -> None:
         if not channels:
             return
@@ -1247,7 +1306,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _main_dataframe(self) -> pd.DataFrame:
         rows = []
-        for row in range(4, self.tableWidget_Edit_channels.rowCount()):
+        for row in range(self._special_row_count(), self.tableWidget_Edit_channels.rowCount()):
             channel_item = self.tableWidget_Edit_channels.item(row, 0)
             value_item = self.tableWidget_Edit_channels.item(row, 1)
             relative_item = self.tableWidget_Edit_channels.item(row, 2)
@@ -1267,7 +1326,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sub_dataframe(self) -> pd.DataFrame:
         rows = []
-        for row in range(4):
+        for row in range(self._special_row_count()):
             channel_item = self.tableWidget_Edit_channels.item(row, 0)
             value_item = self.tableWidget_Edit_channels.item(row, 1)
             relative_item = self.tableWidget_Edit_channels.item(row, 2)
